@@ -268,6 +268,7 @@ impl SessionClient {
     ///   `/api/auth/login` is usually 404 and may occasionally be 401.
     /// - UniFi OS: both `/api/login` and `/api/auth/login` can return 401.
     pub async fn detect_platform(base_url: &Url) -> Result<ControllerPlatform, Error> {
+        crate::transport::ensure_crypto_provider();
         let http = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .build()

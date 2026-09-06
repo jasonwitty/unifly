@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -10,11 +12,15 @@ use secrecy::ExposeSecret;
 
 use crate::config::AuthCredentials;
 use crate::core_error::CoreError;
+use crate::websocket::DeviceSync;
 use crate::websocket::{ReconnectConfig, WebSocketHandle};
 use crate::{IntegrationClient, SessionClient};
 
 use super::support::{build_transport, resolve_site, tls_to_transport};
 use super::{COMMAND_CHANNEL_SIZE, ConnectionState, Controller, refresh};
+
+/// How often coalesced `device:sync` frames are applied to the store.
+const DEVICE_SYNC_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Controller {
     // ── Connection lifecycle ─────────────────────────────────────
@@ -279,6 +285,20 @@ impl Controller {
             self.spawn_websocket(&child, &mut handles).await;
         }
 
+        // Without a WebSocket nothing pushes live device stats, so fall back
+        // to a lightweight statistics poll (Integration API only) that runs
+        // faster than the full refresh.
+        let ws_active = self.inner.ws_handle.lock().await.is_some();
+        let poll_secs = config.polling_interval_secs;
+        if !ws_active && poll_secs > 0 && (interval_secs == 0 || poll_secs < interval_secs) {
+            debug!(poll_secs, "no WebSocket stream; polling device statistics");
+            handles.push(tokio::spawn(refresh::stats_poll_task(
+                self.clone(),
+                poll_secs,
+                child.clone(),
+            )));
+        }
+
         let _ = self.inner.connection_state.send(ConnectionState::Connected);
         info!("connected to controller");
         Ok(())
@@ -349,23 +369,44 @@ impl Controller {
         // Bridge task: WS events → domain Events → broadcast channel.
         // Also extracts real-time device stats from `device:sync` messages
         // to feed the dashboard chart without waiting for full_refresh().
+        //
+        // `device:sync` frames arrive several times a second per device.
+        // They are coalesced by MAC (latest frame wins) and applied under
+        // one mutation batch on a fixed cadence, so subscribers see at most
+        // one devices snapshot per `DEVICE_SYNC_FLUSH_INTERVAL` instead of
+        // a full snapshot rebuild per frame. `EVT_*` events stay immediate.
         let mut ws_rx = handle.subscribe();
         let event_tx = self.inner.event_tx.clone();
         let store = Arc::clone(&self.inner.store);
         let bridge_cancel = ws_cancel;
 
         handles.push(tokio::spawn(async move {
+            let mut pending_sync: HashMap<String, Box<DeviceSync>> = HashMap::new();
+            let mut flush = tokio::time::interval(DEVICE_SYNC_FLUSH_INTERVAL);
+            flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
                 tokio::select! {
                     biased;
                     () = bridge_cancel.cancelled() => break,
+                    _ = flush.tick(), if !pending_sync.is_empty() => {
+                        tracing::debug!(devices = pending_sync.len(), "applying coalesced device:sync batch");
+                        let batch = store.devices.begin_batch();
+                        for sync in pending_sync.values() {
+                            super::runtime::apply_device_sync(&store, sync);
+                        }
+                        drop(batch);
+                        pending_sync.clear();
+                    }
                     result = ws_rx.recv() => {
                         match result {
                             Ok(ws_event) => {
                                 store.mark_ws_event(chrono::Utc::now());
 
-                                if ws_event.key == "device:sync" || ws_event.key == "device:update" {
-                                    super::runtime::apply_device_sync(&store, &ws_event.extra);
+                                if let Some(sync) = ws_event.device_sync.as_ref()
+                                    && let Some(mac) = sync.mac.as_deref()
+                                {
+                                    pending_sync.insert(mac.to_ascii_lowercase(), sync.clone());
                                 }
 
                                 if ws_event.key.starts_with("EVT_") {

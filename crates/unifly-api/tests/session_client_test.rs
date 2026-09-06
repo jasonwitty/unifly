@@ -11,6 +11,7 @@ use unifly_api::{ControllerPlatform, Error, SessionClient, TransportConfig, sess
 // ── Helpers ─────────────────────────────────────────────────────────
 
 async fn setup() -> (MockServer, SessionClient) {
+    unifly_api::transport::ensure_crypto_provider();
     let server = MockServer::start().await;
     let base_url = Url::parse(&server.uri()).unwrap();
     let client = SessionClient::with_client(
@@ -24,6 +25,7 @@ async fn setup() -> (MockServer, SessionClient) {
 }
 
 async fn setup_api_key() -> (MockServer, SessionClient) {
+    unifly_api::transport::ensure_crypto_provider();
     let server = MockServer::start().await;
     let base_url = Url::parse(&server.uri()).unwrap();
     let client = SessionClient::with_client(
