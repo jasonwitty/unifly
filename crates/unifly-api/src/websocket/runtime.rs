@@ -14,7 +14,10 @@ use crate::transport::TlsMode;
 use super::parser::{UnifiEvent, parse_and_broadcast};
 use super::tls::build_tls_connector;
 
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Broadcast ring depth. Each slot pins an `Arc<UnifiEvent>` until every
+/// subscriber has read past it, so keep this small; a lagging consumer gets
+/// `RecvError::Lagged` rather than the ring growing.
+const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 /// Exponential backoff configuration for WebSocket reconnection.
 #[derive(Debug, Clone)]
@@ -45,7 +48,9 @@ impl Default for ReconnectConfig {
 /// Cheaply cloneable via the inner broadcast sender. Drop all handles
 /// and call [`shutdown`](Self::shutdown) to tear down the background task.
 pub struct WebSocketHandle {
-    event_rx: broadcast::Receiver<Arc<UnifiEvent>>,
+    /// Sender side only: holding a `Receiver` here would pin every slot in
+    /// the ring for a consumer that never reads.
+    event_tx: broadcast::Sender<Arc<UnifiEvent>>,
     cancel: CancellationToken,
 }
 
@@ -62,14 +67,15 @@ impl WebSocketHandle {
         cookie: Option<String>,
         tls_mode: TlsMode,
     ) -> Result<Self, Error> {
-        let (event_tx, event_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
         let task_cancel = cancel.clone();
+        let loop_tx = event_tx.clone();
         tokio::spawn(async move {
-            ws_loop(ws_url, event_tx, reconnect, task_cancel, cookie, tls_mode).await;
+            ws_loop(ws_url, loop_tx, reconnect, task_cancel, cookie, tls_mode).await;
         });
 
-        Ok(Self { event_rx, cancel })
+        Ok(Self { event_tx, cancel })
     }
 
     /// Get a new broadcast receiver for the event stream.
@@ -77,7 +83,7 @@ impl WebSocketHandle {
     /// Multiple consumers can subscribe concurrently. If a consumer falls
     /// behind, it receives [`broadcast::error::RecvError::Lagged`].
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<UnifiEvent>> {
-        self.event_rx.resubscribe()
+        self.event_tx.subscribe()
     }
 
     /// Signal the background task to shut down gracefully.

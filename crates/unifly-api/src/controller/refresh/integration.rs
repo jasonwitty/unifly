@@ -144,7 +144,7 @@ async fn fetch_network_details(
     .await
 }
 
-async fn fetch_device_statistics(
+pub(super) async fn fetch_device_statistics(
     integration: Arc<IntegrationClient>,
     site_id: uuid::Uuid,
     devices: Vec<Device>,

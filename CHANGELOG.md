@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+
+- **TUI memory and idle CPU.** The dashboard used ~100 MB RSS at start and
+  grew without bound overnight (250 MB+). Root cause was glibc per-thread
+  malloc arena fragmentation fed by a full controller refresh every 10 s
+  that parsed the entire `stat/device` / `stat/sta` / `rest/user` payloads
+  into flattened `serde_json` maps on a one-worker-per-core tokio runtime.
+  - The binary now builds its own tokio runtime: one worker for `tui`, two
+    for CLI commands, `UNIFLY_WORKER_THREADS` (1-16) overrides both.
+  - TUI full-refresh cadence is 60 s by default (was 10 s), configurable via
+    `[defaults].tui_refresh_secs` or `unifly tui --refresh-secs N`
+    (`UNIFI_TUI_REFRESH_SECS`). Live device stats and events still arrive
+    over the WebSocket in hybrid/session auth.
+  - `polling_interval_secs` is now honoured: when no WebSocket is available
+    (API-key or cloud auth) the controller polls only per-device statistics
+    from the Integration API every 10 s (30 s cloud), so the dashboard keeps
+    moving without the full refresh. Previously the setting was unused.
+  - WebSocket `device:sync` decode failures are logged (once at warn) instead
+    of silently disabling live stats; all numeric fields accept number or
+    string encodings.
+  - Session models (`SessionDevice`, `SessionClientEntry`, `SessionUserEntry`)
+    carry typed fields instead of a `#[serde(flatten)]` catch-all map; the
+    switch-port commands fetch the raw record on demand.
+  - WebSocket `device:sync` frames are parsed into a typed `DeviceSync`
+    instead of retaining the raw JSON, coalesced into one store snapshot per
+    second, and the event ring shrank from 1024 to 64 slots.
+  - Session bodies decode from bytes without an intermediate UTF-8 `String`.
+  - Dashboard traffic chart records one real sample per second (was four,
+    with exponential smoothing interpolating between controller updates that
+    arrive ~1/s). The chart still redraws on every 250 ms tick while focused,
+    scrolling continuously by the fraction of the interval elapsed and
+    holding the last real value out to "now", so motion is smooth without
+    plotting invented points. Window is 60 samples (one minute).
+- **Binary size.** Release builds use fat LTO, reqwest is built with
+  `rustls-no-provider` so only `ring` is linked (aws-lc-rs removed), and 17
+  unused dependencies were dropped (six ratatui widget crates, two panic
+  handlers, `strum`, `arc-swap`, `async-stream`, `bytes`, `indicatif`,
+  `bytesize`, `humantime`, `indexmap`, `flate2`, plus the unused
+  `tracing-subscriber/json` feature). Stripped x86_64 binary: 22.0 MB → 18.2 MB.
+  A new `release-small` cargo profile (`opt-level = "s"`) builds a 13.0 MB
+  binary for low-power hosts at ~5% more TUI CPU.
+
+
 ### Added
 
 - **Create commands print the created entity on stdout** in the requested

@@ -35,6 +35,10 @@ use crate::sanitizer::Sanitizer;
 /// Sets up file-based tracing, installs panic hooks, initializes the theme,
 /// builds a controller (with graceful fallback), and runs the TUI app loop.
 #[allow(clippy::future_not_send)]
+/// Floor for the TUI full-refresh cadence; anything lower re-parses the
+/// whole controller state faster than it can change.
+const MIN_TUI_REFRESH_SECS: u64 = 5;
+
 pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
     terminal::install_hooks()?;
 
@@ -59,13 +63,21 @@ pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
         "starting unifly tui"
     );
 
-    let controller =
-        build_controller_direct(global).or_else(|| build_controller_from_config(global));
+    let cfg = loaded_config.as_ref();
+    let refresh_secs = args
+        .refresh_secs
+        .or_else(|| cfg.map(|c| c.defaults.tui_refresh_secs))
+        .unwrap_or(config::DEFAULT_TUI_REFRESH_SECS)
+        .max(MIN_TUI_REFRESH_SECS);
 
-    let sanitizer = resolve_sanitizer(global);
-    let effects_enabled = resolve_effects_enabled(global);
+    let controller = build_controller_direct(global, cfg, refresh_secs)
+        .or_else(|| build_controller_from_config(global, cfg, refresh_secs));
 
-    let mut app = app::App::new(controller, sanitizer, effects_enabled);
+    let sanitizer = resolve_sanitizer(global, cfg);
+    let effects_enabled = resolve_effects_enabled(global, cfg);
+    let show_donate = cfg.is_none_or(|c| c.defaults.show_donate);
+
+    let mut app = app::App::new(controller, sanitizer, effects_enabled, show_donate);
     app.run().await?;
 
     Ok(())
@@ -75,14 +87,14 @@ pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
 ///
 /// Resolution order (first "off" wins):
 ///   `--no-effects` flag → `NO_EFFECTS` env var → `[defaults].effects` config → default on.
-fn resolve_effects_enabled(global: &GlobalOpts) -> bool {
+fn resolve_effects_enabled(global: &GlobalOpts, cfg: Option<&config::Config>) -> bool {
     if global.no_effects {
         return false;
     }
     if std::env::var_os("NO_EFFECTS").is_some() {
         return false;
     }
-    config::load_config().map_or(true, |c| c.defaults.effects)
+    cfg.is_none_or(|c| c.defaults.effects)
 }
 
 fn setup_tracing(verbosity: u8, log_file: &std::path::Path) -> WorkerGuard {
@@ -118,7 +130,11 @@ fn setup_tracing(verbosity: u8, log_file: &std::path::Path) -> WorkerGuard {
     guard
 }
 
-fn build_controller_direct(global: &GlobalOpts) -> Option<Controller> {
+fn build_controller_direct(
+    global: &GlobalOpts,
+    cfg: Option<&config::Config>,
+    refresh_secs: u64,
+) -> Option<Controller> {
     let is_cloud = global.host_id.is_some();
     let url_str = global.controller.as_deref().or({
         if is_cloud {
@@ -143,7 +159,7 @@ fn build_controller_direct(global: &GlobalOpts) -> Option<Controller> {
             host_id: host_id.clone(),
         }
     } else {
-        try_hybrid_from_config(&api_key, global).unwrap_or(AuthCredentials::ApiKey(api_key))
+        try_hybrid_from_config(&api_key, global, cfg).unwrap_or(AuthCredentials::ApiKey(api_key))
     };
 
     let tls = if is_cloud {
@@ -167,7 +183,7 @@ fn build_controller_direct(global: &GlobalOpts) -> Option<Controller> {
         site,
         tls,
         timeout: std::time::Duration::from_secs(global.timeout_secs(None, None)),
-        refresh_interval_secs: if is_cloud { 60 } else { 10 },
+        refresh_interval_secs: refresh_secs,
         websocket_enabled: !is_cloud,
         polling_interval_secs: if is_cloud { 30 } else { 10 },
         totp_token,
@@ -178,8 +194,12 @@ fn build_controller_direct(global: &GlobalOpts) -> Option<Controller> {
     Some(Controller::new(controller_config))
 }
 
-fn try_hybrid_from_config(api_key: &SecretString, global: &GlobalOpts) -> Option<AuthCredentials> {
-    let cfg = config::load_config().ok()?;
+fn try_hybrid_from_config(
+    api_key: &SecretString,
+    global: &GlobalOpts,
+    cfg: Option<&config::Config>,
+) -> Option<AuthCredentials> {
+    let cfg = cfg?;
     let name = global
         .profile
         .as_deref()
@@ -191,7 +211,18 @@ fn try_hybrid_from_config(api_key: &SecretString, global: &GlobalOpts) -> Option
         return None;
     }
 
-    let (username, password) = config::resolve_session_credentials(profile, name).ok()?;
+    let (username, password) = match config::resolve_session_credentials(profile, name) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            tracing::warn!(
+                profile = name,
+                %error,
+                "profile is hybrid but session credentials are unavailable; \
+                 continuing with API key only (no WebSocket, statistics polled instead)"
+            );
+            return None;
+        }
+    };
 
     Some(AuthCredentials::Hybrid {
         api_key: api_key.clone(),
@@ -200,13 +231,14 @@ fn try_hybrid_from_config(api_key: &SecretString, global: &GlobalOpts) -> Option
     })
 }
 
-fn build_controller_from_config(global: &GlobalOpts) -> Option<Controller> {
-    let cfg = match config::load_config() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            tracing::warn!("failed to load config: {e}");
-            return None;
-        }
+fn build_controller_from_config(
+    global: &GlobalOpts,
+    cfg: Option<&config::Config>,
+    refresh_secs: u64,
+) -> Option<Controller> {
+    let Some(cfg) = cfg else {
+        tracing::warn!("no config file loaded; cannot build controller from profile");
+        return None;
     };
 
     let profile_name = global
@@ -229,7 +261,7 @@ fn build_controller_from_config(global: &GlobalOpts) -> Option<Controller> {
     match config::resolve::resolve_profile(profile, profile_name, global, &cfg.defaults) {
         Ok(mut controller_config) => {
             let is_cloud = matches!(controller_config.auth, AuthCredentials::Cloud { .. });
-            controller_config.refresh_interval_secs = if is_cloud { 60 } else { 10 };
+            controller_config.refresh_interval_secs = refresh_secs;
             controller_config.websocket_enabled = !is_cloud;
             controller_config.polling_interval_secs = if is_cloud { 30 } else { 10 };
             Some(Controller::new(controller_config))
@@ -241,8 +273,8 @@ fn build_controller_from_config(global: &GlobalOpts) -> Option<Controller> {
     }
 }
 
-fn resolve_sanitizer(global: &GlobalOpts) -> Option<Arc<Sanitizer>> {
-    let mut demo_config = config::load_config().map(|c| c.demo).unwrap_or_default();
+fn resolve_sanitizer(global: &GlobalOpts, cfg: Option<&config::Config>) -> Option<Arc<Sanitizer>> {
+    let mut demo_config = cfg.map(|c| c.demo.clone()).unwrap_or_default();
 
     if global.demo {
         demo_config.enabled = true;

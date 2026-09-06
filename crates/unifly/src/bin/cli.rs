@@ -10,15 +10,53 @@ use unifly::config::resolve;
 
 use unifly_api::Controller;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
-    if let Err(err) = run(cli).await {
+    let runtime = match build_runtime(worker_threads_for(&cli.command)) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("failed to start async runtime: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = runtime.block_on(run(cli)) {
         let code = err.exit_code();
         eprintln!("{:?}", miette::Report::new(err));
         std::process::exit(code);
     }
+}
+
+/// Environment override for the tokio worker-thread count (1-16).
+const WORKER_THREADS_ENV: &str = "UNIFLY_WORKER_THREADS";
+
+/// Pick the tokio worker-thread count for a command.
+///
+/// Tokio's default is one worker per core, which on a many-core machine
+/// means dozens of idle threads and, with glibc malloc, one heap arena per
+/// thread that touched the allocator. Every path in unifly is I/O bound and
+/// nothing blocks the runtime, so the TUI runs on a single worker and the
+/// CLI on two. `UNIFLY_WORKER_THREADS` overrides both.
+fn worker_threads_for(command: &Command) -> usize {
+    let default = match command {
+        #[cfg(feature = "tui")]
+        Command::Tui(_) => 1,
+        _ => 2,
+    };
+    std::env::var(WORKER_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+        .clamp(1, 16)
+}
+
+fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name("unifly-rt")
+        .enable_all()
+        .build()
 }
 
 fn init_tracing(verbosity: u8) {
