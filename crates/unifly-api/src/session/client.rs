@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use reqwest::cookie::{CookieStore, Jar};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use url::Url;
 
 use crate::auth::ControllerPlatform;
@@ -40,6 +40,42 @@ pub enum SessionAuth {
     ApiKey,
 }
 
+/// Credentials retained after a cookie login so the client can log in again
+/// on its own when the controller reports the session as expired.
+///
+/// Without this a long-running process (the TUI) silently loses every
+/// Session-backed feature roughly an hour in, when the cookie lapses.
+pub struct ReauthCredentials {
+    pub username: String,
+    pub password: secrecy::SecretString,
+    pub totp_token: Option<secrecy::SecretString>,
+    /// Session cache to refresh after a successful re-login, if enabled.
+    pub cache: Option<super::session_cache::SessionCache>,
+}
+
+impl std::fmt::Debug for ReauthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReauthCredentials")
+            .field("username", &self.username)
+            .field("cache", &self.cache.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Minimum spacing between re-login attempts after a failure, so a changed
+/// password cannot turn every refresh into a login storm.
+const REAUTH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+/// A re-login this recent is treated as "already done" by concurrent
+/// callers that hit the same expiry (the refresh fans out seven requests).
+const REAUTH_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Default)]
+struct ReauthSlot {
+    credentials: Option<ReauthCredentials>,
+    last_attempt: Option<std::time::Instant>,
+    last_success: Option<std::time::Instant>,
+}
+
 /// Raw HTTP client for the UniFi controller's session API.
 ///
 /// Handles the `{ data: [], meta: { rc, msg } }` envelope, site-scoped
@@ -58,6 +94,8 @@ pub struct SessionClient {
     csrf_token: RwLock<Option<String>>,
     /// Cookie jar reference for extracting session cookies (e.g. for WebSocket auth).
     cookie_jar: Option<Arc<Jar>>,
+    /// Self-healing state: see [`ReauthCredentials`].
+    reauth: tokio::sync::Mutex<ReauthSlot>,
 }
 
 /// First ~200 bytes of a response body for error messages, never panicking
@@ -94,6 +132,7 @@ impl SessionClient {
             auth: SessionAuth::Cookie,
             csrf_token: RwLock::new(None),
             cookie_jar,
+            reauth: tokio::sync::Mutex::default(),
         })
     }
 
@@ -116,6 +155,98 @@ impl SessionClient {
             auth,
             csrf_token: RwLock::new(None),
             cookie_jar: None,
+            reauth: tokio::sync::Mutex::default(),
+        }
+    }
+
+    /// Keep credentials so the client can re-authenticate itself when a
+    /// request fails with [`Error::SessionExpired`]. Only meaningful for
+    /// [`SessionAuth::Cookie`] clients.
+    pub async fn enable_reauth(&self, credentials: ReauthCredentials) {
+        let mut slot = self.reauth.lock().await;
+        slot.credentials = Some(credentials);
+    }
+
+    /// Run `op`; if it fails because the session expired and credentials
+    /// are available, log in again and run `op` once more.
+    async fn with_reauth<T, F, Fut>(&self, op: F) -> Result<T, Error>
+    where
+        F: Fn() -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<T, Error>> + Send,
+    {
+        match op().await {
+            Err(Error::SessionExpired) if self.try_reauthenticate().await => op().await,
+            result => result,
+        }
+    }
+
+    /// Attempt a re-login. Serialised through a mutex so concurrent callers
+    /// that hit the same expiry share one login; rate-limited after failure.
+    async fn try_reauthenticate(&self) -> bool {
+        if self.auth != SessionAuth::Cookie {
+            debug!("session expired on an API-key client; nothing to re-authenticate");
+            return false;
+        }
+        let mut slot = self.reauth.lock().await;
+        let ReauthSlot {
+            credentials,
+            last_attempt,
+            last_success,
+        } = &mut *slot;
+        let Some(credentials) = credentials.as_ref() else {
+            warn!("session expired but no credentials were retained for re-login");
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if last_success.is_some_and(|at| now.duration_since(at) < REAUTH_FRESH) {
+            return true;
+        }
+        if last_attempt.is_some_and(|at| now.duration_since(at) < REAUTH_COOLDOWN) {
+            debug!("session expired; re-login attempted recently, not retrying yet");
+            return false;
+        }
+        *last_attempt = Some(now);
+        info!("session expired; re-authenticating");
+        // Send the login without the dead cookie attached. UniFi OS treats
+        // a request that still carries an expired TOKEN differently from a
+        // clean login, and a stale cookie left in the jar would shadow the
+        // new one.
+        let stale = self.cookie_header();
+        self.clear_session_cookies();
+        match self
+            .login(
+                &credentials.username,
+                &credentials.password,
+                credentials.totp_token.as_ref(),
+            )
+            .await
+        {
+            Ok(()) => {
+                let fresh = self.cookie_header();
+                if self.cookie_jar.is_some() && (fresh.is_none() || fresh == stale) {
+                    warn!(
+                        got_cookie = fresh.is_some(),
+                        retry_in_secs = REAUTH_COOLDOWN.as_secs(),
+                        "login succeeded but returned no new session cookie; \
+                         re-authentication did not take"
+                    );
+                    return false;
+                }
+                if let Some(cache) = credentials.cache.as_ref() {
+                    self.cache_current_session(cache);
+                }
+                *last_success = Some(now);
+                info!("session re-authenticated");
+                true
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    retry_in_secs = REAUTH_COOLDOWN.as_secs(),
+                    "session re-authentication failed"
+                );
+                false
+            }
         }
     }
 
@@ -142,6 +273,28 @@ impl SessionClient {
     /// The detected controller platform.
     pub fn platform(&self) -> ControllerPlatform {
         self.platform
+    }
+
+    /// Remove every cookie currently held for the controller by writing an
+    /// already-expired replacement for each name. No-op without a jar.
+    fn clear_session_cookies(&self) {
+        let Some(jar) = self.cookie_jar.as_ref() else {
+            return;
+        };
+        let Some(header) = self.cookie_header() else {
+            return;
+        };
+        let names: Vec<String> = header
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('=').map(|(name, _)| name.to_owned()))
+            .collect();
+        for name in names {
+            let expired = format!("{name}=; Path=/; Max-Age=0");
+            if let Ok(value) = expired.parse::<reqwest::header::HeaderValue>() {
+                jar.set_cookies(&mut std::iter::once(&value), &self.base_url);
+            }
+        }
+        debug!("cleared stale session cookies before re-login");
     }
 
     /// Extract the session cookie header value for WebSocket auth.
@@ -266,6 +419,10 @@ impl SessionClient {
 
     /// Send a GET request and unwrap the session envelope.
     pub(crate) async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
+        self.with_reauth(|| self.get_once(url.clone())).await
+    }
+
+    async fn get_once<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
         debug!("GET {}", url);
 
         let resp = self.http.get(url).send().await.map_err(Error::Transport)?;
@@ -278,6 +435,10 @@ impl SessionClient {
     /// Used for v2 API endpoints that return plain JSON instead of the
     /// session `{ meta, data }` envelope.
     pub(crate) async fn get_raw(&self, url: Url) -> Result<serde_json::Value, Error> {
+        self.with_reauth(|| self.get_raw_once(url.clone())).await
+    }
+
+    async fn get_raw_once(&self, url: Url) -> Result<serde_json::Value, Error> {
         debug!("GET (raw) {}", url);
 
         let resp = self.http.get(url).send().await.map_err(Error::Transport)?;
@@ -306,6 +467,14 @@ impl SessionClient {
         url: Url,
         body: &(impl Serialize + Sync),
     ) -> Result<Vec<T>, Error> {
+        self.with_reauth(|| self.post_once(url.clone(), body)).await
+    }
+
+    async fn post_once<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &(impl Serialize + Sync),
+    ) -> Result<Vec<T>, Error> {
         debug!("POST {}", url);
 
         let builder = self.apply_csrf(self.http.post(url).json(body));
@@ -321,6 +490,14 @@ impl SessionClient {
         url: Url,
         body: &(impl Serialize + Sync),
     ) -> Result<Vec<T>, Error> {
+        self.with_reauth(|| self.put_once(url.clone(), body)).await
+    }
+
+    async fn put_once<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &(impl Serialize + Sync),
+    ) -> Result<Vec<T>, Error> {
         debug!("PUT {}", url);
 
         let builder = self.apply_csrf(self.http.put(url).json(body));
@@ -332,6 +509,10 @@ impl SessionClient {
     /// Send a DELETE request and unwrap the session envelope.
     #[allow(dead_code)]
     pub(crate) async fn delete<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
+        self.with_reauth(|| self.delete_once(url.clone())).await
+    }
+
+    async fn delete_once<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
         debug!("DELETE {}", url);
 
         let builder = self.apply_csrf(self.http.delete(url));
@@ -353,6 +534,14 @@ impl SessionClient {
 
     /// Send a raw POST to an arbitrary path (no envelope unwrapping).
     pub async fn raw_post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        self.with_reauth(|| self.raw_post_once(path, body)).await
+    }
+
+    async fn raw_post_once(
         &self,
         path: &str,
         body: &serde_json::Value,
@@ -390,6 +579,14 @@ impl SessionClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
+        self.with_reauth(|| self.raw_put_once(path, body)).await
+    }
+
+    async fn raw_put_once(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
         let prefix = self.platform.session_prefix().unwrap_or("");
         let base = self.base_url.as_str().trim_end_matches('/');
         let prefix = prefix.trim_end_matches('/');
@@ -423,6 +620,14 @@ impl SessionClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
+        self.with_reauth(|| self.raw_patch_once(path, body)).await
+    }
+
+    async fn raw_patch_once(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
         let prefix = self.platform.session_prefix().unwrap_or("");
         let base = self.base_url.as_str().trim_end_matches('/');
         let prefix = prefix.trim_end_matches('/');
@@ -452,6 +657,10 @@ impl SessionClient {
 
     /// Send a raw DELETE to an arbitrary path (no envelope unwrapping).
     pub async fn raw_delete(&self, path: &str) -> Result<(), Error> {
+        self.with_reauth(|| self.raw_delete_once(path)).await
+    }
+
+    async fn raw_delete_once(&self, path: &str) -> Result<(), Error> {
         let prefix = self.platform.session_prefix().unwrap_or("");
         let base = self.base_url.as_str().trim_end_matches('/');
         let prefix = prefix.trim_end_matches('/');
@@ -518,9 +727,10 @@ impl SessionClient {
                     self.unauthorized_error()
                 } else {
                     match self.unauthorized_error() {
-                        Error::SessionExpired => Error::Authentication {
-                            message: format!("session expired: {msg}"),
-                        },
+                        Error::SessionExpired => {
+                            debug!(%msg, "controller reports the session expired");
+                            Error::SessionExpired
+                        }
                         Error::InvalidApiKey => Error::Authentication {
                             message: format!("API key rejected: {msg}"),
                         },

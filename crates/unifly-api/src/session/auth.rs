@@ -177,8 +177,6 @@ impl SessionClient {
         totp_token: Option<&secrecy::SecretString>,
         cache: &super::session_cache::SessionCache,
     ) -> Result<(), Error> {
-        use super::session_cache::{EXPIRY_MARGIN_SECS, fallback_expiry, jwt_expiry};
-
         // Try cached session first
         if let Some((cookie, csrf)) = cache.load() {
             self.add_cookie(&cookie, self.base_url())?;
@@ -195,8 +193,15 @@ impl SessionClient {
 
         // Fresh login
         self.login(username, password, totp_token).await?;
+        self.cache_current_session(cache);
+        Ok(())
+    }
 
-        // Cache the new session
+    /// Persist the current cookie and CSRF token to `cache`, with an expiry
+    /// derived from the cookie's JWT (minus a safety margin) when possible.
+    pub(crate) fn cache_current_session(&self, cache: &super::session_cache::SessionCache) {
+        use super::session_cache::{EXPIRY_MARGIN_SECS, fallback_expiry, jwt_expiry};
+
         if let Some(cookie) = self.cookie_header() {
             let csrf = self.csrf_token_value();
             let expires_at = jwt_expiry(&cookie).map_or_else(fallback_expiry, |exp| {
@@ -204,8 +209,6 @@ impl SessionClient {
             });
             cache.save(&cookie, csrf.as_deref(), expires_at);
         }
-
-        Ok(())
     }
 
     /// Validate the current session by probing a lightweight endpoint.

@@ -36,4 +36,4 @@ pub use parser::{
     DeviceSync, DeviceSyncSysStats, DeviceSyncUplink, DeviceSyncWan, NumOrStr, UnifiEvent,
     is_device_sync,
 };
-pub use runtime::{ReconnectConfig, WebSocketHandle};
+pub use runtime::{CookieProvider, ReconnectConfig, WebSocketHandle};
