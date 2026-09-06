@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use reqwest::cookie::{CookieStore, Jar};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use url::Url;
 
 use crate::auth::ControllerPlatform;
@@ -58,6 +58,12 @@ pub struct SessionClient {
     csrf_token: RwLock<Option<String>>,
     /// Cookie jar reference for extracting session cookies (e.g. for WebSocket auth).
     cookie_jar: Option<Arc<Jar>>,
+}
+
+/// First ~200 bytes of a response body for error messages, never panicking
+/// on a multi-byte character boundary.
+fn body_preview(body: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(&body[..body.len().min(200)])
 }
 
 impl SessionClient {
@@ -281,16 +287,16 @@ impl SessionClient {
             return Err(self.unauthorized_error());
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
-        let body = resp.text().await.map_err(Error::Transport)?;
-        serde_json::from_str(&body).map_err(|e| Error::Deserialization {
+        let body = resp.bytes().await.map_err(Error::Transport)?;
+        serde_json::from_slice(&body).map_err(|e| Error::Deserialization {
             message: format!("{e}"),
-            body,
+            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -365,16 +371,16 @@ impl SessionClient {
             return Err(self.unauthorized_error());
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
-        let body = resp.text().await.map_err(Error::Transport)?;
-        serde_json::from_str(&body).map_err(|e| Error::Deserialization {
+        let body = resp.bytes().await.map_err(Error::Transport)?;
+        serde_json::from_slice(&body).map_err(|e| Error::Deserialization {
             message: format!("{e}"),
-            body,
+            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -398,16 +404,16 @@ impl SessionClient {
             return Err(self.unauthorized_error());
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
-        let body = resp.text().await.map_err(Error::Transport)?;
-        serde_json::from_str(&body).map_err(|e| Error::Deserialization {
+        let body = resp.bytes().await.map_err(Error::Transport)?;
+        serde_json::from_slice(&body).map_err(|e| Error::Deserialization {
             message: format!("{e}"),
-            body,
+            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -431,16 +437,16 @@ impl SessionClient {
             return Err(self.unauthorized_error());
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
-        let body = resp.text().await.map_err(Error::Transport)?;
-        serde_json::from_str(&body).map_err(|e| Error::Deserialization {
+        let body = resp.bytes().await.map_err(Error::Transport)?;
+        serde_json::from_slice(&body).map_err(|e| Error::Deserialization {
             message: format!("{e}"),
-            body,
+            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -460,9 +466,9 @@ impl SessionClient {
             return Err(self.unauthorized_error());
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
@@ -494,16 +500,16 @@ impl SessionClient {
         }
 
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.bytes().await.unwrap_or_default();
             return Err(Error::SessionApi {
-                message: format!("HTTP {status}: {}", &body[..body.len().min(200)]),
+                message: format!("HTTP {status}: {}", body_preview(&body)),
             });
         }
 
-        let body = resp.text().await.map_err(Error::Transport)?;
+        let body = resp.bytes().await.map_err(Error::Transport)?;
 
         // UniFi OS sometimes returns `{"error":{"code":N,"message":"..."}}` with HTTP 200.
-        if let Ok(wrapper) = serde_json::from_str::<UnifiOsError>(&body)
+        if let Ok(wrapper) = serde_json::from_slice::<UnifiOsError>(&body)
             && let Some(err) = wrapper.error
         {
             let msg = err.message.unwrap_or_default();
@@ -528,23 +534,54 @@ impl SessionClient {
             });
         }
 
-        let envelope: SessionResponse<T> = serde_json::from_str(&body).map_err(|e| {
-            let preview = &body[..body.len().min(200)];
-            Error::Deserialization {
-                message: format!("{e} (body preview: {preview:?})"),
-                body: body.clone(),
-            }
-        })?;
+        let envelope: SessionResponse<serde_json::Value> =
+            serde_json::from_slice(&body).map_err(|e| {
+                let preview = body_preview(&body);
+                Error::Deserialization {
+                    message: format!("{e} (body preview: {preview:?})"),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                }
+            })?;
 
-        match envelope.meta.rc.as_str() {
-            "ok" => Ok(envelope.data),
-            _ => Err(Error::SessionApi {
+        if envelope.meta.rc != "ok" {
+            return Err(Error::SessionApi {
                 message: envelope
                     .meta
                     .msg
                     .unwrap_or_else(|| format!("rc={}", envelope.meta.rc)),
-            }),
+            });
         }
+
+        // Decode per record so one unexpected field shape (UniFi is fond of
+        // `"auto"` where a number is documented) drops that record with a
+        // warning instead of blanking the whole collection. If every record
+        // fails, surface the first error so single-item lookups still report
+        // a real deserialization problem rather than "not found".
+        let total = envelope.data.len();
+        let mut items = Vec::with_capacity(total);
+        let mut first_error = None;
+        for (index, value) in envelope.data.into_iter().enumerate() {
+            match serde_json::from_value::<T>(value) {
+                Ok(item) => items.push(item),
+                Err(error) => {
+                    warn!(index, %error, "skipping session record that failed to decode");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if items.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(Error::Deserialization {
+                message: format!("{error} (all {total} records failed to decode)"),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+
+        Ok(items)
     }
 }
 
@@ -556,6 +593,7 @@ mod tests {
     use crate::{ControllerPlatform, Error};
 
     fn client(auth: SessionAuth) -> SessionClient {
+        crate::transport::ensure_crypto_provider();
         SessionClient::with_client(
             reqwest::Client::new(),
             Url::parse("https://controller.example").expect("valid test URL"),
