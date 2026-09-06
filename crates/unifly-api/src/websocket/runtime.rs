@@ -43,6 +43,13 @@ impl Default for ReconnectConfig {
     }
 }
 
+/// Supplies the `Cookie` header for each connection attempt.
+///
+/// Read fresh on every (re)connect so that a session re-login performed
+/// elsewhere (see `SessionClient::enable_reauth`) is picked up without
+/// tearing the stream down by hand.
+pub type CookieProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Handle to a running WebSocket event stream.
 ///
 /// Cheaply cloneable via the inner broadcast sender. Drop all handles
@@ -64,7 +71,7 @@ impl WebSocketHandle {
         ws_url: Url,
         reconnect: ReconnectConfig,
         cancel: CancellationToken,
-        cookie: Option<String>,
+        cookie: CookieProvider,
         tls_mode: TlsMode,
     ) -> Result<Self, Error> {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -97,20 +104,31 @@ async fn ws_loop(
     event_tx: broadcast::Sender<Arc<UnifiEvent>>,
     reconnect: ReconnectConfig,
     cancel: CancellationToken,
-    cookie: Option<String>,
+    cookie: CookieProvider,
     tls_mode: TlsMode,
 ) {
     let mut attempt: u32 = 0;
 
     loop {
+        let current_cookie = cookie();
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            result = connect_and_read(&ws_url, &event_tx, &cancel, cookie.as_deref(), &tls_mode) => {
+            result = connect_and_read(&ws_url, &event_tx, &cancel, current_cookie.as_deref(), &tls_mode) => {
                 match result {
                     Ok(()) => {
+                        // A server-side close (e.g. the session cookie lapsed)
+                        // used to reconnect immediately, which spins when the
+                        // controller keeps accepting and closing. Pause for the
+                        // initial backoff instead; the cookie provider hands us
+                        // a fresh cookie once the session re-authenticates.
                         tracing::info!("WebSocket disconnected cleanly, reconnecting");
                         attempt = 0;
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => break,
+                            () = tokio::time::sleep(reconnect.initial_delay) => {}
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, attempt, "WebSocket error");

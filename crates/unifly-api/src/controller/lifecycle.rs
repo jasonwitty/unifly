@@ -12,8 +12,9 @@ use secrecy::ExposeSecret;
 
 use crate::config::AuthCredentials;
 use crate::core_error::CoreError;
+use crate::session::ReauthCredentials;
 use crate::websocket::DeviceSync;
-use crate::websocket::{ReconnectConfig, WebSocketHandle};
+use crate::websocket::{CookieProvider, ReconnectConfig, WebSocketHandle};
 use crate::{IntegrationClient, SessionClient};
 
 use super::support::{build_transport, resolve_site, tls_to_transport};
@@ -145,6 +146,14 @@ impl Controller {
                         .await?;
                 }
                 debug!("session authentication successful");
+                client
+                    .enable_reauth(ReauthCredentials {
+                        username: username.clone(),
+                        password: password.clone(),
+                        totp_token: config.totp_token.clone(),
+                        cache,
+                    })
+                    .await;
 
                 *self.inner.session_client.lock().await = Some(Arc::new(client));
             }
@@ -211,6 +220,14 @@ impl Controller {
                         match login_result {
                             Ok(()) => {
                                 debug!("session authentication successful (hybrid)");
+                                client
+                                    .enable_reauth(ReauthCredentials {
+                                        username: username.clone(),
+                                        password: password.clone(),
+                                        totp_token: config.totp_token.clone(),
+                                        cache,
+                                    })
+                                    .await;
                                 *self.inner.session_client.lock().await = Some(Arc::new(client));
                             }
                             Err(e) => {
@@ -343,12 +360,13 @@ impl Controller {
             }
         };
 
-        let cookie = session.cookie_header();
-
-        if cookie.is_none() {
+        if session.cookie_header().is_none() {
             warn!("no session cookie — WebSocket requires session auth (skipping)");
             return;
         }
+        // Read on every (re)connect so a re-login mid-session is picked up.
+        let cookie_session = Arc::clone(&session);
+        let cookie: CookieProvider = Arc::new(move || cookie_session.cookie_header());
 
         let ws_tls = tls_to_transport(&self.inner.config.tls);
         let ws_cancel = cancel.child_token();
