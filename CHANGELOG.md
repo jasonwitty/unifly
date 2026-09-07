@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session expiry no longer kills a long-running TUI.** The session cookie
+  lapses roughly an hour in; previously every Session-backed fetch (client
+  details, health, events, NAT, firewall groups, Wi-Fi neighbours, switch
+  ports) failed with "Session expired" from then on and the WebSocket never
+  came back, because login only ever ran at connect. `SessionClient` now
+  keeps the login credentials (`enable_reauth`) and on `SessionExpired`
+  re-logs in once, refreshes the session cache, and retries the request;
+  failed re-logins are rate-limited to one per 30 s. Stale cookies are
+  cleared before the re-login and a login that returns no new cookie is
+  reported as a failure rather than silently retried. The WebSocket reads its
+  cookie from the session client on every reconnect, and a server-side clean
+  close now waits the initial backoff instead of reconnecting immediately.
+
 ### Performance
 
 - **TUI memory and idle CPU.** The dashboard used ~100 MB RSS at start and
