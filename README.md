@@ -1,3 +1,20 @@
+# Branch information
+
+This branch builds a memory efficient version of unifly optimized for low power systems and long usage. To build compact release build with profile below.
+
+```bash
+cargo build --profile release-small -p unifly
+```
+## Results
+
+- 10-12X reduction in memory
+- 0 memory growth over time
+- session tokens to unify console never expire
+
+---
+
+
+
 <h1 align="center">
   <br>
   🌐 unifly
