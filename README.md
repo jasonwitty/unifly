@@ -12,8 +12,11 @@ cargo build --profile release-small -p unifly
 - session tokens to unify console never expire
 
 ---
+AFTER:
 
+<img width="1182" height="871" alt="image" src="https://github.com/user-attachments/assets/b2ac3ffb-1508-402a-8524-a9566a5e3a8e" />
 
+---
 
 <h1 align="center">
   <br>
