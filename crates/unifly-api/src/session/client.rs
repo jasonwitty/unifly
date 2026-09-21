@@ -171,6 +171,13 @@ impl SessionClient {
 
     /// Run `op`; if it fails because the session expired and credentials
     /// are available, log in again and run `op` once more.
+    ///
+    /// Replaying a request is only safe when the request is safe, so this is
+    /// reserved for reads. State-changing verbs use
+    /// [`Self::with_reauth_no_replay`]: a 401 is normally raised before the
+    /// controller dispatches the operation, but nothing in the UniFi API
+    /// contract guarantees it, and a replayed `POST` would create a second
+    /// record or repeat a device command.
     async fn with_reauth<T, F, Fut>(&self, op: F) -> Result<T, Error>
     where
         F: Fn() -> Fut + Send + Sync,
@@ -253,6 +260,28 @@ impl SessionClient {
                 );
                 false
             }
+        }
+    }
+
+    /// Run `op` once. If the session had expired, re-authenticate so the
+    /// *next* request succeeds, but surface the error instead of replaying a
+    /// request that the controller may already have applied.
+    async fn with_reauth_no_replay<T, F, Fut>(&self, op: F) -> Result<T, Error>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, Error>>,
+    {
+        match op().await {
+            Err(Error::SessionExpired) => {
+                if self.try_reauthenticate().await {
+                    warn!(
+                        "session expired during a state-changing request; \
+                         re-authenticated but did not replay it -- retry the operation"
+                    );
+                }
+                Err(Error::SessionExpired)
+            }
+            other => other,
         }
     }
 
@@ -475,10 +504,11 @@ impl SessionClient {
         url: Url,
         body: &(impl Serialize + Sync),
     ) -> Result<Vec<T>, Error> {
-        self.with_reauth(|| self.post_once(url.clone(), body)).await
+        self.with_reauth_no_replay(|| self.post_once(url.clone(), body))
+            .await
     }
 
-    /// One POST attempt; [`Self::post`] adds the re-auth retry.
+    /// One POST attempt; [`Self::post`] re-authenticates without replaying.
     async fn post_once<T: DeserializeOwned>(
         &self,
         url: Url,
@@ -499,10 +529,11 @@ impl SessionClient {
         url: Url,
         body: &(impl Serialize + Sync),
     ) -> Result<Vec<T>, Error> {
-        self.with_reauth(|| self.put_once(url.clone(), body)).await
+        self.with_reauth_no_replay(|| self.put_once(url.clone(), body))
+            .await
     }
 
-    /// One PUT attempt; [`Self::put`] adds the re-auth retry.
+    /// One PUT attempt; [`Self::put`] re-authenticates without replaying.
     async fn put_once<T: DeserializeOwned>(
         &self,
         url: Url,
@@ -519,10 +550,11 @@ impl SessionClient {
     /// Send a DELETE request and unwrap the session envelope.
     #[allow(dead_code)]
     pub(crate) async fn delete<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
-        self.with_reauth(|| self.delete_once(url.clone())).await
+        self.with_reauth_no_replay(|| self.delete_once(url.clone()))
+            .await
     }
 
-    /// One DELETE attempt; [`Self::delete`] adds the re-auth retry.
+    /// One DELETE attempt; [`Self::delete`] re-authenticates without replaying.
     async fn delete_once<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
         debug!("DELETE {}", url);
 
@@ -549,10 +581,11 @@ impl SessionClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        self.with_reauth(|| self.raw_post_once(path, body)).await
+        self.with_reauth_no_replay(|| self.raw_post_once(path, body))
+            .await
     }
 
-    /// One raw POST attempt; [`Self::raw_post`] adds the re-auth retry.
+    /// One raw POST attempt; [`Self::raw_post`] re-authenticates without replaying.
     async fn raw_post_once(
         &self,
         path: &str,
@@ -591,10 +624,11 @@ impl SessionClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        self.with_reauth(|| self.raw_put_once(path, body)).await
+        self.with_reauth_no_replay(|| self.raw_put_once(path, body))
+            .await
     }
 
-    /// One raw PUT attempt; [`Self::raw_put`] adds the re-auth retry.
+    /// One raw PUT attempt; [`Self::raw_put`] re-authenticates without replaying.
     async fn raw_put_once(
         &self,
         path: &str,
@@ -633,10 +667,11 @@ impl SessionClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        self.with_reauth(|| self.raw_patch_once(path, body)).await
+        self.with_reauth_no_replay(|| self.raw_patch_once(path, body))
+            .await
     }
 
-    /// One raw PATCH attempt; [`Self::raw_patch`] adds the re-auth retry.
+    /// One raw PATCH attempt; [`Self::raw_patch`] re-authenticates without replaying.
     async fn raw_patch_once(
         &self,
         path: &str,
@@ -671,10 +706,11 @@ impl SessionClient {
 
     /// Send a raw DELETE to an arbitrary path (no envelope unwrapping).
     pub async fn raw_delete(&self, path: &str) -> Result<(), Error> {
-        self.with_reauth(|| self.raw_delete_once(path)).await
+        self.with_reauth_no_replay(|| self.raw_delete_once(path))
+            .await
     }
 
-    /// One raw DELETE attempt; [`Self::raw_delete`] adds the re-auth retry.
+    /// One raw DELETE attempt; [`Self::raw_delete`] re-authenticates without replaying.
     async fn raw_delete_once(&self, path: &str) -> Result<(), Error> {
         let prefix = self.platform.session_prefix().unwrap_or("");
         let base = self.base_url.as_str().trim_end_matches('/');
@@ -917,6 +953,63 @@ mod tests {
             .raw_get("api/s/default/stat/health")
             .await
             .expect("second expiry must re-login rather than hit the cooldown");
+
+        server.verify().await;
+    }
+
+    /// A state-changing request must never be replayed after an expiry. A
+    /// 401 is normally raised before the controller dispatches the write,
+    /// but the API makes no such guarantee, and a replayed POST would create
+    /// a second record. The client re-authenticates so the next call works,
+    /// then surfaces the error.
+    #[tokio::test]
+    async fn expired_mutation_reauthenticates_without_replaying() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        crate::transport::ensure_crypto_provider();
+        let server = MockServer::start().await;
+        let client = SessionClient::with_client(
+            reqwest::Client::new(),
+            Url::parse(&server.uri()).expect("mock server URL is valid"),
+            "default".into(),
+            ControllerPlatform::ClassicController,
+            SessionAuth::Cookie,
+        );
+        client
+            .enable_reauth(ReauthCredentials {
+                username: "admin".into(),
+                password: secrecy::SecretString::from("pw".to_string()),
+                totp_token: None,
+                cache: None,
+            })
+            .await;
+
+        // The write is attempted exactly once, never a second time.
+        Mock::given(method("POST"))
+            .and(path("/api/s/default/rest/firewallgroup"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The re-login still happens, so the next request would succeed.
+        Mock::given(method("POST"))
+            .and(path("/api/login"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"meta": {"rc": "ok"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = client
+            .raw_post(
+                "api/s/default/rest/firewallgroup",
+                &serde_json::json!({"name": "test"}),
+            )
+            .await
+            .expect_err("an expired mutation must surface the error");
+        assert!(matches!(error, Error::SessionExpired));
 
         server.verify().await;
     }

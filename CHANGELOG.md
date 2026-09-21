@@ -15,8 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ports) failed with "Session expired" from then on and the WebSocket never
   came back, because login only ever ran at connect. `SessionClient` now
   keeps the login credentials (`enable_reauth`) and on `SessionExpired`
-  re-logs in once, refreshes the session cache, and retries the request;
-  failed re-logins are rate-limited to one per 30 s. Stale cookies are
+  re-logs in once and refreshes the session cache. A **read** is then
+  retried transparently; a **state-changing request is not replayed** --
+  the client re-authenticates so the next call succeeds and surfaces the
+  error, because a 401 is normally raised before the controller dispatches
+  the write but nothing in the API contract guarantees it, and a replayed
+  `POST` would create a second record or repeat a device command. Failed
+  re-logins are rate-limited to one per 30 s, and a successful one clears
+  that cooldown so a later expiry is not blocked by it. Stale cookies are
   cleared before the re-login and a login that returns no new cookie is
   reported as a failure rather than silently retried. The WebSocket reads its
   cookie from the session client on every reconnect, and a server-side clean
