@@ -30,38 +30,18 @@ fn main() {
     }
 }
 
-/// Environment override for the tokio worker-thread count (1-16).
-const WORKER_THREADS_ENV: &str = "UNIFLY_WORKER_THREADS";
-
 /// Pick the tokio worker-thread count for a command.
 ///
 /// Tokio's default is one worker per core, which on a many-core machine
 /// means dozens of idle threads and, with glibc malloc, one heap arena per
 /// thread that touched the allocator. Every path in unifly is I/O bound and
 /// nothing blocks the runtime, so the TUI runs on a single worker and the
-/// CLI on two. `UNIFLY_WORKER_THREADS` overrides both.
+/// CLI on two.
 fn worker_threads_for(command: &Command) -> usize {
-    let default = match command {
+    match command {
         #[cfg(feature = "tui")]
         Command::Tui(_) => 1,
         _ => 2,
-    };
-    let Ok(raw) = std::env::var(WORKER_THREADS_ENV) else {
-        return default;
-    };
-    let trimmed = raw.trim();
-    match trimmed.parse::<usize>() {
-        Ok(n) if (1..=16).contains(&n) => n,
-        _ => {
-            // Tracing is not up yet, so this goes straight to stderr. A bad
-            // value is an operator mistake worth surfacing, but not worth
-            // refusing to start over.
-            eprintln!(
-                "warning: {WORKER_THREADS_ENV} must be a whole number from 1 to 16, \
-                 got {trimmed:?}; using 1"
-            );
-            1
-        }
     }
 }
 

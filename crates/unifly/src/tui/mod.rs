@@ -35,10 +35,6 @@ use crate::sanitizer::Sanitizer;
 /// Sets up file-based tracing, installs panic hooks, initializes the theme,
 /// builds a controller (with graceful fallback), and runs the TUI app loop.
 #[allow(clippy::future_not_send)]
-/// Floor for the TUI full-refresh cadence; anything lower re-parses the
-/// whole controller state faster than it can change.
-const MIN_TUI_REFRESH_SECS: u64 = 5;
-
 pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
     terminal::install_hooks()?;
 
@@ -64,21 +60,8 @@ pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
     );
 
     let cfg = loaded_config.as_ref();
-    let requested = args
-        .refresh_secs
-        .or_else(|| cfg.map(|c| c.defaults.tui_refresh_secs))
-        .unwrap_or(config::DEFAULT_TUI_REFRESH_SECS);
-    let refresh_secs = requested.max(MIN_TUI_REFRESH_SECS);
-    if requested < MIN_TUI_REFRESH_SECS {
-        tracing::warn!(
-            requested,
-            using = refresh_secs,
-            "[defaults].tui_refresh_secs is below the {MIN_TUI_REFRESH_SECS}s minimum; using the minimum"
-        );
-    }
-
-    let controller = build_controller_direct(global, cfg, refresh_secs)
-        .or_else(|| build_controller_from_config(global, cfg, refresh_secs));
+    let controller =
+        build_controller_direct(global, cfg).or_else(|| build_controller_from_config(global, cfg));
 
     let sanitizer = resolve_sanitizer(global, cfg);
     let effects_enabled = resolve_effects_enabled(global, cfg);
@@ -142,7 +125,6 @@ fn setup_tracing(verbosity: u8, log_file: &std::path::Path) -> WorkerGuard {
 fn build_controller_direct(
     global: &GlobalOpts,
     cfg: Option<&config::Config>,
-    refresh_secs: u64,
 ) -> Option<Controller> {
     let is_cloud = global.host_id.is_some();
     let url_str = global.controller.as_deref().or({
@@ -192,7 +174,7 @@ fn build_controller_direct(
         site,
         tls,
         timeout: std::time::Duration::from_secs(global.timeout_secs(None, None)),
-        refresh_interval_secs: refresh_secs,
+        refresh_interval_secs: if is_cloud { 60 } else { 10 },
         websocket_enabled: !is_cloud,
         polling_interval_secs: if is_cloud { 30 } else { 10 },
         totp_token,
@@ -248,7 +230,6 @@ fn try_hybrid_from_config(
 fn build_controller_from_config(
     global: &GlobalOpts,
     cfg: Option<&config::Config>,
-    refresh_secs: u64,
 ) -> Option<Controller> {
     let Some(cfg) = cfg else {
         tracing::warn!("no config file loaded; cannot build controller from profile");
@@ -275,7 +256,7 @@ fn build_controller_from_config(
     match config::resolve::resolve_profile(profile, profile_name, global, &cfg.defaults) {
         Ok(mut controller_config) => {
             let is_cloud = matches!(controller_config.auth, AuthCredentials::Cloud { .. });
-            controller_config.refresh_interval_secs = refresh_secs;
+            controller_config.refresh_interval_secs = if is_cloud { 60 } else { 10 };
             controller_config.websocket_enabled = !is_cloud;
             controller_config.polling_interval_secs = if is_cloud { 30 } else { 10 };
             Some(Controller::new(controller_config))

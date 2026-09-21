@@ -36,15 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that parsed the entire `stat/device` / `stat/sta` / `rest/user` payloads
   into flattened `serde_json` maps on a one-worker-per-core tokio runtime.
   - The binary now builds its own tokio runtime: one worker for `tui`, two
-    for CLI commands, `UNIFLY_WORKER_THREADS` (1-16) overrides both.
-  - TUI full-refresh cadence is 60 s by default (was 10 s), configurable via
-    `[defaults].tui_refresh_secs` or `unifly tui --refresh-secs N`
-    (`UNIFI_TUI_REFRESH_SECS`). Live device stats and events still arrive
-    over the WebSocket in hybrid/session auth.
+    for CLI commands, instead of tokio's one-per-core default. Refresh
+    cadence is unchanged.
   - `polling_interval_secs` is now honoured: when no WebSocket is available
     (API-key or cloud auth) the controller polls only per-device statistics
-    from the Integration API every 10 s (30 s cloud), so the dashboard keeps
-    moving without the full refresh. Previously the setting was unused.
+    from the Integration API rather than nothing at all. Previously the
+    setting was unused.
   - WebSocket `device:sync` decode failures are logged (once at warn) instead
     of silently disabling live stats; all numeric fields accept number or
     string encodings.

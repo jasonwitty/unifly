@@ -53,7 +53,8 @@ command -v unifly >/dev/null 2>&1 && unifly --version || echo "unifly not instal
 
 If unifly is not installed, prefer `brew install hyperb1iss/tap/unifly` on
 macOS or `cargo install --git https://github.com/hyperb1iss/unifly.git unifly`
-elsewhere. After install, run `unifly config init` for a local controller or
+elsewhere; on low-power hosts build with `cargo build --profile release-small
+-p unifly` for a smaller binary. After install, run `unifly config init` for a local controller or
 `unifly config cloud-setup` for Site Manager. See `examples/config.toml` for
 manual configuration.
 
@@ -317,10 +318,9 @@ UNIFI_PROFILE=warehouse unifly system health
 2. **Environment variables use the `UNIFI_` prefix, not `UNIFLY_`.** Relevant
    vars: `UNIFI_URL`, `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD`,
    `UNIFI_SITE`, `UNIFI_PROFILE`, `UNIFI_OUTPUT`, `UNIFI_INSECURE`,
-   `UNIFI_TIMEOUT`, `UNIFI_TOTP`, `UNIFI_HOST_ID`, `UNIFI_DEMO`,
-   `UNIFI_TUI_REFRESH_SECS`. The `UNIFLY_*` vars are `UNIFLY_THEME`, which
-   themes both CLI output and the TUI, and `UNIFLY_WORKER_THREADS`, which
-   sets the tokio worker count (1-16; default 1 for `tui`, 2 for CLI).
+   `UNIFI_TIMEOUT`, `UNIFI_TOTP`, `UNIFI_HOST_ID`, `UNIFI_DEMO`. The only
+   `UNIFLY_*` var is `UNIFLY_THEME`, which themes both CLI output and the
+   TUI.
 3. **`--yes` / `-y`** skips confirmation prompts for mutations. Required for
    non-interactive use.
 4. **API key mode covers most commands** on UniFi OS, including Session API

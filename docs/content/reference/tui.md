@@ -13,7 +13,6 @@ unifly tui                   # Launch with default profile
 unifly tui -p office         # Use a specific profile
 unifly tui -k                # Accept self-signed TLS certs
 unifly tui -v                # Verbose logging to temp directory
-unifly tui --refresh-secs 30 # Full-refresh cadence (minimum 5, default 60)
 ```
 
 ## Screens
@@ -108,8 +107,7 @@ Navigate detail tabs with `h`/`l`. Press `Esc` to close.
 
 {% mermaid() %}
 graph LR
-API["Integration + Session APIs"] -->|"Full refresh, 60s"| DS["DataStore"]
-POLL["Device statistics poll"] -->|"Every 10s"| DS
+API["Integration + Session APIs"] -->|"Every 10s"| DS["DataStore"]
 WS["WebSocket"] -->|"Real-time push"| DS
 DS -->|"watch channels"| TUI["TUI Screens"]
 
@@ -118,14 +116,10 @@ DS -->|"watch channels"| TUI["TUI Screens"]
 
 {% end %}
 
-- **Full refresh** (devices, clients, networks, firewall, health): every 60
-  seconds. Tune with `--refresh-secs`, `UNIFI_TUI_REFRESH_SECS`, or
-  `[defaults].tui_refresh_secs`; the minimum is 5.
-- **Device statistics**: pushed over the WebSocket in hybrid/session auth. With
-  API-key or cloud auth there is no WebSocket, so the controller polls
-  per-device statistics every 10 seconds (30 for cloud) instead.
+- **Devices and clients**: polled every 10 seconds from both APIs
+- **Health and system info**: polled every 10 seconds
 - **Events**: pushed via WebSocket in real-time (no polling delay)
-- **Bandwidth**: sampled from device stats as they arrive
+- **Bandwidth**: sampled from device stats on each refresh cycle
 
 ## Authentication Modes
 

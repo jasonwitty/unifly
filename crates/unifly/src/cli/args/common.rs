@@ -140,10 +140,6 @@ pub struct TuiArgs {
     /// Log file path
     #[arg(long, default_value_os_t = default_tui_log_path())]
     pub log_file: std::path::PathBuf,
-
-    /// Seconds between full data refreshes (overrides `[defaults].tui_refresh_secs`)
-    #[arg(long, env = "UNIFI_TUI_REFRESH_SECS", value_parser = clap::value_parser!(u64).range(5..))]
-    pub refresh_secs: Option<u64>,
 }
 
 #[cfg(feature = "tui")]

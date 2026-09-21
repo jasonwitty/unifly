@@ -167,22 +167,6 @@ pub struct Defaults {
     /// Defaults to "octant" when unset.
     #[serde(default)]
     pub chart_quality: Option<String>,
-
-    /// Seconds between full data refreshes in the TUI. Live device stats
-    /// arrive over the WebSocket (hybrid/session auth) or a lightweight
-    /// 10-second statistics poll (API-key/cloud auth) regardless, so this
-    /// only bounds how stale the slower collections (networks, firewall,
-    /// ...) can get. Defaults to 60.
-    #[serde(default = "default_tui_refresh_secs")]
-    pub tui_refresh_secs: u64,
-}
-
-/// Default seconds between full TUI refreshes.
-pub const DEFAULT_TUI_REFRESH_SECS: u64 = 60;
-
-/// Serde default for [`Defaults::tui_refresh_secs`].
-fn default_tui_refresh_secs() -> u64 {
-    DEFAULT_TUI_REFRESH_SECS
 }
 
 impl Default for Defaults {
@@ -194,7 +178,6 @@ impl Default for Defaults {
             timeout: default_timeout(),
             theme: None,
             show_donate: default_show_donate(),
-            tui_refresh_secs: default_tui_refresh_secs(),
             effects: default_effects(),
             chart_quality: None,
         }
