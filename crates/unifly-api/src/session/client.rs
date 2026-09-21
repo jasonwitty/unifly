@@ -214,6 +214,11 @@ impl SessionClient {
             debug!("session expired; re-login attempted recently, not retrying yet");
             return false;
         }
+        // Provisional, so a future cancelled mid-login still leaves the
+        // cooldown armed. Every exit below overwrites it with the instant
+        // the attempt actually finished: a login is a network round trip,
+        // and timing the windows from before it would let a slow login
+        // expire its own cooldown.
         *last_attempt = Some(now);
         info!("session expired; re-authenticating");
         // Send the login without the dead cookie attached. UniFi OS treats
@@ -239,6 +244,7 @@ impl SessionClient {
                         "login succeeded but returned no new session cookie; \
                          re-authentication did not take"
                     );
+                    *last_attempt = Some(std::time::Instant::now());
                     return false;
                 }
                 if let Some(cache) = credentials.cache.as_ref() {
@@ -248,7 +254,7 @@ impl SessionClient {
                 // the attempt timestamp set would block a genuine second
                 // expiry that lands inside the cooldown window.
                 *last_attempt = None;
-                *last_success = Some(now);
+                *last_success = Some(std::time::Instant::now());
                 info!("session re-authenticated");
                 true
             }
@@ -258,6 +264,7 @@ impl SessionClient {
                     retry_in_secs = REAUTH_COOLDOWN.as_secs(),
                     "session re-authentication failed"
                 );
+                *last_attempt = Some(std::time::Instant::now());
                 false
             }
         }
@@ -955,6 +962,76 @@ mod tests {
             .expect("second expiry must re-login rather than hit the cooldown");
 
         server.verify().await;
+    }
+
+    /// The re-auth windows must be timed from when a login *finished*, not
+    /// from before it started. A login is a network round trip; timing from
+    /// the start lets a slow login hand back an already-stale `last_success`
+    /// (and, on the failure paths, an `last_attempt` that has already
+    /// outlived its own cooldown).
+    #[tokio::test]
+    async fn reauth_timestamps_are_taken_after_the_login_completes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const LOGIN_LATENCY: std::time::Duration = std::time::Duration::from_millis(150);
+
+        crate::transport::ensure_crypto_provider();
+        let server = MockServer::start().await;
+        let client = SessionClient::with_client(
+            reqwest::Client::new(),
+            Url::parse(&server.uri()).expect("mock server URL is valid"),
+            "default".into(),
+            ControllerPlatform::ClassicController,
+            SessionAuth::Cookie,
+        );
+        client
+            .enable_reauth(ReauthCredentials {
+                username: "admin".into(),
+                password: secrecy::SecretString::from("pw".to_string()),
+                totp_token: None,
+                cache: None,
+            })
+            .await;
+
+        let ok =
+            || ResponseTemplate::new(200).set_body_json(serde_json::json!({"meta": {"rc": "ok"}}));
+        Mock::given(method("GET"))
+            .and(path("/api/s/default/stat/health"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/s/default/stat/health"))
+            .respond_with(ok())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/login"))
+            .respond_with(ok().set_delay(LOGIN_LATENCY))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let before = std::time::Instant::now();
+        client
+            .raw_get("api/s/default/stat/health")
+            .await
+            .expect("re-login recovers the request");
+
+        let slot = client.reauth.lock().await;
+        let recorded = slot
+            .last_success
+            .expect("a successful re-login is recorded");
+        assert!(
+            recorded.duration_since(before) >= LOGIN_LATENCY,
+            "last_success was stamped before the login finished: {:?} elapsed, \
+             login took at least {LOGIN_LATENCY:?}",
+            recorded.duration_since(before),
+        );
     }
 
     /// A state-changing request must never be replayed after an expiry. A
