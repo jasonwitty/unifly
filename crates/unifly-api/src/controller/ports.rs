@@ -230,7 +230,7 @@ impl Controller {
 
         debug!(port_idx_target, "updating port_overrides");
         session
-            .update_device_port_overrides(raw_device_id(&device), overrides)
+            .update_device_port_overrides(raw_device_id(&device, device_mac)?, overrides)
             .await?;
         Ok(())
     }
@@ -326,7 +326,7 @@ impl Controller {
             "applying batch port_overrides",
         );
         session
-            .update_device_port_overrides(raw_device_id(&device), overrides)
+            .update_device_port_overrides(raw_device_id(&device, device_mac)?, overrides)
             .await?;
         Ok(summary)
     }
@@ -662,12 +662,19 @@ fn parse_apply_speed(raw: &str) -> Result<PortSpeedSetting, CoreError> {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
-/// The `_id` of a raw session device record (empty if absent).
-fn raw_device_id(device: &Value) -> &str {
+/// The `_id` of a raw session device record.
+///
+/// The per-device `rest/device/{id}` endpoint cannot identify a device
+/// without it, so a missing or empty `_id` is an error rather than an empty
+/// path segment that would PUT against the collection.
+fn raw_device_id<'a>(device: &'a Value, mac: &MacAddress) -> Result<&'a str, CoreError> {
     device
         .get("_id")
         .and_then(Value::as_str)
-        .unwrap_or_default()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| CoreError::DeviceNotFound {
+            identifier: mac.to_string(),
+        })
 }
 
 fn port_idx(value: &Value) -> Option<u32> {

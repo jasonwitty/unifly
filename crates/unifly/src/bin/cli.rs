@@ -10,6 +10,8 @@ use unifly::config::resolve;
 
 use unifly_api::Controller;
 
+/// Parses the CLI, then builds the runtime by hand rather than using
+/// `#[tokio::main]`, so the worker-thread count can depend on the command.
 fn main() {
     let cli = Cli::parse();
 
@@ -44,13 +46,27 @@ fn worker_threads_for(command: &Command) -> usize {
         Command::Tui(_) => 1,
         _ => 2,
     };
-    std::env::var(WORKER_THREADS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(default)
-        .clamp(1, 16)
+    let Ok(raw) = std::env::var(WORKER_THREADS_ENV) else {
+        return default;
+    };
+    let trimmed = raw.trim();
+    match trimmed.parse::<usize>() {
+        Ok(n) if (1..=16).contains(&n) => n,
+        _ => {
+            // Tracing is not up yet, so this goes straight to stderr. A bad
+            // value is an operator mistake worth surfacing, but not worth
+            // refusing to start over.
+            eprintln!(
+                "warning: {WORKER_THREADS_ENV} must be a whole number from 1 to 16, \
+                 got {trimmed:?}; using 1"
+            );
+            1
+        }
+    }
 }
 
+/// Build the tokio runtime with an explicit worker count; see
+/// [`worker_threads_for`] for why the default is not one-per-core.
 fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)

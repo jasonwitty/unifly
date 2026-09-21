@@ -64,11 +64,18 @@ pub async fn launch(global: &GlobalOpts, args: TuiArgs) -> Result<()> {
     );
 
     let cfg = loaded_config.as_ref();
-    let refresh_secs = args
+    let requested = args
         .refresh_secs
         .or_else(|| cfg.map(|c| c.defaults.tui_refresh_secs))
-        .unwrap_or(config::DEFAULT_TUI_REFRESH_SECS)
-        .max(MIN_TUI_REFRESH_SECS);
+        .unwrap_or(config::DEFAULT_TUI_REFRESH_SECS);
+    let refresh_secs = requested.max(MIN_TUI_REFRESH_SECS);
+    if requested < MIN_TUI_REFRESH_SECS {
+        tracing::warn!(
+            requested,
+            using = refresh_secs,
+            "[defaults].tui_refresh_secs is below the {MIN_TUI_REFRESH_SECS}s minimum; using the minimum"
+        );
+    }
 
     let controller = build_controller_direct(global, cfg, refresh_secs)
         .or_else(|| build_controller_from_config(global, cfg, refresh_secs));
@@ -130,6 +137,8 @@ fn setup_tracing(verbosity: u8, log_file: &std::path::Path) -> WorkerGuard {
     guard
 }
 
+/// Build a controller from explicit CLI flags and environment variables,
+/// bypassing the config profile.
 fn build_controller_direct(
     global: &GlobalOpts,
     cfg: Option<&config::Config>,
@@ -194,6 +203,9 @@ fn build_controller_direct(
     Some(Controller::new(controller_config))
 }
 
+/// Pair an API key with profile credentials to upgrade an Integration-only
+/// connection to hybrid auth. Returns `None` when the profile has no
+/// username/password to add.
 fn try_hybrid_from_config(
     api_key: &SecretString,
     global: &GlobalOpts,
@@ -231,6 +243,8 @@ fn try_hybrid_from_config(
     })
 }
 
+/// Build a controller from the active config profile. Returns `None` when no
+/// config is loaded or the profile is unusable.
 fn build_controller_from_config(
     global: &GlobalOpts,
     cfg: Option<&config::Config>,
@@ -273,6 +287,8 @@ fn build_controller_from_config(
     }
 }
 
+/// Resolve demo-mode PII sanitization from the `--demo` flag and config,
+/// with the flag forcing it on. Returns `None` when demo mode is off.
 fn resolve_sanitizer(global: &GlobalOpts, cfg: Option<&config::Config>) -> Option<Arc<Sanitizer>> {
     let mut demo_config = cfg.map(|c| c.demo.clone()).unwrap_or_default();
 

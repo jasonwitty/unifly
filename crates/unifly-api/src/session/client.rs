@@ -54,6 +54,8 @@ pub struct ReauthCredentials {
 }
 
 impl std::fmt::Debug for ReauthCredentials {
+    /// Hand-written so the password and TOTP token can never reach a log
+    /// line; only the username and whether a cache is attached are shown.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReauthCredentials")
             .field("username", &self.username)
@@ -235,6 +237,10 @@ impl SessionClient {
                 if let Some(cache) = credentials.cache.as_ref() {
                     self.cache_current_session(cache);
                 }
+                // The cooldown exists to throttle *failed* re-logins. Leaving
+                // the attempt timestamp set would block a genuine second
+                // expiry that lands inside the cooldown window.
+                *last_attempt = None;
                 *last_success = Some(now);
                 info!("session re-authenticated");
                 true
@@ -422,6 +428,7 @@ impl SessionClient {
         self.with_reauth(|| self.get_once(url.clone())).await
     }
 
+    /// One GET attempt; [`Self::get`] wraps it in [`Self::with_reauth`].
     async fn get_once<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
         debug!("GET {}", url);
 
@@ -438,6 +445,7 @@ impl SessionClient {
         self.with_reauth(|| self.get_raw_once(url.clone())).await
     }
 
+    /// One raw GET attempt; [`Self::get_raw`] adds the re-auth retry.
     async fn get_raw_once(&self, url: Url) -> Result<serde_json::Value, Error> {
         debug!("GET (raw) {}", url);
 
@@ -470,6 +478,7 @@ impl SessionClient {
         self.with_reauth(|| self.post_once(url.clone(), body)).await
     }
 
+    /// One POST attempt; [`Self::post`] adds the re-auth retry.
     async fn post_once<T: DeserializeOwned>(
         &self,
         url: Url,
@@ -493,6 +502,7 @@ impl SessionClient {
         self.with_reauth(|| self.put_once(url.clone(), body)).await
     }
 
+    /// One PUT attempt; [`Self::put`] adds the re-auth retry.
     async fn put_once<T: DeserializeOwned>(
         &self,
         url: Url,
@@ -512,6 +522,7 @@ impl SessionClient {
         self.with_reauth(|| self.delete_once(url.clone())).await
     }
 
+    /// One DELETE attempt; [`Self::delete`] adds the re-auth retry.
     async fn delete_once<T: DeserializeOwned>(&self, url: Url) -> Result<Vec<T>, Error> {
         debug!("DELETE {}", url);
 
@@ -541,6 +552,7 @@ impl SessionClient {
         self.with_reauth(|| self.raw_post_once(path, body)).await
     }
 
+    /// One raw POST attempt; [`Self::raw_post`] adds the re-auth retry.
     async fn raw_post_once(
         &self,
         path: &str,
@@ -582,6 +594,7 @@ impl SessionClient {
         self.with_reauth(|| self.raw_put_once(path, body)).await
     }
 
+    /// One raw PUT attempt; [`Self::raw_put`] adds the re-auth retry.
     async fn raw_put_once(
         &self,
         path: &str,
@@ -623,6 +636,7 @@ impl SessionClient {
         self.with_reauth(|| self.raw_patch_once(path, body)).await
     }
 
+    /// One raw PATCH attempt; [`Self::raw_patch`] adds the re-auth retry.
     async fn raw_patch_once(
         &self,
         path: &str,
@@ -660,6 +674,7 @@ impl SessionClient {
         self.with_reauth(|| self.raw_delete_once(path)).await
     }
 
+    /// One raw DELETE attempt; [`Self::raw_delete`] adds the re-auth retry.
     async fn raw_delete_once(&self, path: &str) -> Result<(), Error> {
         let prefix = self.platform.session_prefix().unwrap_or("");
         let base = self.base_url.as_str().trim_end_matches('/');
@@ -799,7 +814,7 @@ impl SessionClient {
 mod tests {
     use url::Url;
 
-    use super::{SessionAuth, SessionClient};
+    use super::{ReauthCredentials, SessionAuth, SessionClient};
     use crate::{ControllerPlatform, Error};
 
     fn client(auth: SessionAuth) -> SessionClient {
@@ -827,5 +842,82 @@ mod tests {
             client(SessionAuth::ApiKey).unauthorized_error(),
             Error::InvalidApiKey
         ));
+    }
+
+    /// Rewind both re-auth timestamps, standing in for `secs` of elapsed
+    /// time. The cooldown reads `std::time::Instant`, which `tokio`'s paused
+    /// clock does not control, so the stored instants are moved instead.
+    async fn rewind_reauth_clock(client: &SessionClient, secs: u64) {
+        let delta = std::time::Duration::from_secs(secs);
+        let mut slot = client.reauth.lock().await;
+        slot.last_attempt = slot.last_attempt.and_then(|at| at.checked_sub(delta));
+        slot.last_success = slot.last_success.and_then(|at| at.checked_sub(delta));
+    }
+
+    /// A second expiry shortly after a *successful* re-login must trigger
+    /// another login. The cooldown is meant to throttle failed re-logins
+    /// only; leaving `last_attempt` set after success locked the client out
+    /// for the remainder of the 30 s window with valid credentials.
+    #[tokio::test]
+    async fn successful_relogin_does_not_arm_the_failure_cooldown() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        crate::transport::ensure_crypto_provider();
+        let server = MockServer::start().await;
+        let client = SessionClient::with_client(
+            reqwest::Client::new(),
+            Url::parse(&server.uri()).expect("mock server URL is valid"),
+            "default".into(),
+            ControllerPlatform::ClassicController,
+            SessionAuth::Cookie,
+        );
+        client
+            .enable_reauth(ReauthCredentials {
+                username: "admin".into(),
+                password: secrecy::SecretString::from("pw".to_string()),
+                totp_token: None,
+                cache: None,
+            })
+            .await;
+
+        let ok =
+            || ResponseTemplate::new(200).set_body_json(serde_json::json!({"meta": {"rc": "ok"}}));
+        // Expire, recover, then expire a second time.
+        for status in [401u16, 200, 401, 200] {
+            let response = if status == 200 {
+                ok()
+            } else {
+                ResponseTemplate::new(401)
+            };
+            Mock::given(method("GET"))
+                .and(path("/api/s/default/stat/health"))
+                .respond_with(response)
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/login"))
+            .respond_with(ok())
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        client
+            .raw_get("api/s/default/stat/health")
+            .await
+            .expect("first call recovers via re-login");
+
+        // Six seconds on: past REAUTH_FRESH (5 s), inside REAUTH_COOLDOWN (30 s).
+        rewind_reauth_clock(&client, 6).await;
+
+        client
+            .raw_get("api/s/default/stat/health")
+            .await
+            .expect("second expiry must re-login rather than hit the cooldown");
+
+        server.verify().await;
     }
 }
