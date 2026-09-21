@@ -7,8 +7,9 @@ default_profile = "home"
 # Global fallbacks applied when a profile leaves a value unset.
 # Precedence: CLI flags > env vars > profile > [defaults] > builtin.
 [defaults]
-insecure = false # accept self-signed certificates when true
-timeout = 30     # request timeout in seconds
+insecure = false      # accept self-signed certificates when true
+timeout = 30          # request timeout in seconds
+tui_refresh_secs = 60 # seconds between full TUI refreshes (minimum 5)
 
 # Home controller: UDM Pro with hybrid auth
 [profiles.home]

@@ -59,6 +59,7 @@ output = "table"
 color = "auto"
 timeout = 30
 insecure = false
+tui_refresh_secs = 60
 
 [profiles.home]
 controller = "https://192.168.1.1"
@@ -124,21 +125,23 @@ unifly config set timeout 60
 
 All settings can be overridden via environment variables. Useful for CI/CD, scripting, and ephemeral environments.
 
-| Variable         | Description                           |
-| ---------------- | ------------------------------------- |
-| `UNIFI_API_KEY`  | Integration API key                   |
-| `UNIFI_URL`      | Controller URL                        |
-| `UNIFI_USERNAME` | Session API username                  |
-| `UNIFI_PASSWORD` | Session API password                  |
-| `UNIFI_PROFILE`  | Active profile name                   |
-| `UNIFI_SITE`     | Target site name or UUID              |
-| `UNIFI_OUTPUT`   | Default output format                 |
-| `UNIFI_INSECURE` | `1` to accept self-signed certs       |
-| `UNIFI_TIMEOUT`  | Request timeout in seconds            |
-| `UNIFI_TOTP`     | One-time password for MFA controllers |
-| `UNIFI_HOST_ID`  | Site Manager console ID (cloud mode)  |
-| `UNIFI_DEMO`     | `1` to sanitize PII in output         |
-| `NO_COLOR`       | Disable colored output (standard)     |
+| Variable                 | Description                                                 |
+| ------------------------ | ----------------------------------------------------------- |
+| `UNIFI_API_KEY`          | Integration API key                                         |
+| `UNIFI_URL`              | Controller URL                                              |
+| `UNIFI_USERNAME`         | Session API username                                        |
+| `UNIFI_PASSWORD`         | Session API password                                        |
+| `UNIFI_PROFILE`          | Active profile name                                         |
+| `UNIFI_SITE`             | Target site name or UUID                                    |
+| `UNIFI_OUTPUT`           | Default output format                                       |
+| `UNIFI_INSECURE`         | `1` to accept self-signed certs                             |
+| `UNIFI_TIMEOUT`          | Request timeout in seconds                                  |
+| `UNIFI_TOTP`             | One-time password for MFA controllers                       |
+| `UNIFI_HOST_ID`          | Site Manager console ID (cloud mode)                        |
+| `UNIFI_DEMO`             | `1` to sanitize PII in output                               |
+| `UNIFI_TUI_REFRESH_SECS` | Seconds between full TUI refreshes (min 5, default 60)      |
+| `UNIFLY_WORKER_THREADS`  | Tokio worker threads, 1-16 (default 1 for `tui`, 2 for CLI) |
+| `NO_COLOR`               | Disable colored output (standard)                           |
 
 ### Example: CI/CD Pipeline
 

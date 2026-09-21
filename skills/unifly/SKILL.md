@@ -317,9 +317,10 @@ UNIFI_PROFILE=warehouse unifly system health
 2. **Environment variables use the `UNIFI_` prefix, not `UNIFLY_`.** Relevant
    vars: `UNIFI_URL`, `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD`,
    `UNIFI_SITE`, `UNIFI_PROFILE`, `UNIFI_OUTPUT`, `UNIFI_INSECURE`,
-   `UNIFI_TIMEOUT`, `UNIFI_TOTP`, `UNIFI_HOST_ID`, `UNIFI_DEMO`. The only
-   `UNIFLY_*` var is `UNIFLY_THEME`, which themes both CLI output and the
-   TUI.
+   `UNIFI_TIMEOUT`, `UNIFI_TOTP`, `UNIFI_HOST_ID`, `UNIFI_DEMO`,
+   `UNIFI_TUI_REFRESH_SECS`. The `UNIFLY_*` vars are `UNIFLY_THEME`, which
+   themes both CLI output and the TUI, and `UNIFLY_WORKER_THREADS`, which
+   sets the tokio worker count (1-16; default 1 for `tui`, 2 for CLI).
 3. **`--yes` / `-y`** skips confirmation prompts for mutations. Required for
    non-interactive use.
 4. **API key mode covers most commands** on UniFi OS, including Session API

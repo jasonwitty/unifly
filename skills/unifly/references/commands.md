@@ -686,8 +686,12 @@ unifly cloud sdwan status <id>
 
 - `unifly topology`: Pretty-print the gateway > switch > AP > client tree
   (Hybrid recommended for complete uplink data).
-- `unifly tui [--theme NAME] [--log-file PATH]`: Launches the Ratatui
-  dashboard. `UNIFLY_THEME` env var also sets the theme.
+- `unifly tui [--theme NAME] [--log-file PATH] [--refresh-secs N]`:
+  Launches the Ratatui dashboard. `UNIFLY_THEME` env var also sets the
+  theme. `--refresh-secs` (minimum 5, default 60, env
+  `UNIFI_TUI_REFRESH_SECS`, config `[defaults].tui_refresh_secs`) bounds how
+  stale the slower collections get; device stats stream over the WebSocket
+  or a 10-second poll regardless.
 - `unifly completions bash|zsh|fish|powershell|elvish`: Emit completion
   script to stdout.
 - `unifly config init | cloud-setup | show | set | profiles | use | set-password | theme`:
