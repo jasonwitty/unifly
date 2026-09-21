@@ -165,6 +165,7 @@ where
     }))
 }
 
+/// See [`lenient_u32`]; reads a `u64` from a number or numeric string.
 fn lenient_u64_from_value(value: &serde_json::Value) -> Option<u64> {
     match value {
         serde_json::Value::Number(n) => n.as_u64().or_else(|| {

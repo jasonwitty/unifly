@@ -865,6 +865,8 @@ async fn test_mfa_rejects_invalid_totp_format() {
 
 // ── Session re-authentication ───────────────────────────────────────
 
+/// A minimal successful `stat/health` body, used as the post-re-login
+/// response in the re-authentication tests.
 fn health_ok() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "meta": {"rc": "ok"},

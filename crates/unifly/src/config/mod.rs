@@ -180,6 +180,7 @@ pub struct Defaults {
 /// Default seconds between full TUI refreshes.
 pub const DEFAULT_TUI_REFRESH_SECS: u64 = 60;
 
+/// Serde default for [`Defaults::tui_refresh_secs`].
 fn default_tui_refresh_secs() -> u64 {
     DEFAULT_TUI_REFRESH_SECS
 }

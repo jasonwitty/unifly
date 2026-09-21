@@ -233,10 +233,12 @@ fn event_from_raw(msg_type: &str, data: serde_json::Value) -> UnifiEvent {
     }
 }
 
-/// Whether a WebSocket key is a live device-stats frame.
+/// Set once the first undecodable device-sync frame has been reported, so a
+/// broken payload warns loudly one time instead of on every frame.
 static SYNC_DECODE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Whether a WebSocket key is a live device-stats frame.
 pub fn is_device_sync(key: &str) -> bool {
     key == "device:sync" || key == "device:update"
 }

@@ -54,6 +54,8 @@ fn map_device_state(code: i32) -> DeviceState {
     }
 }
 
+/// Extract the uplink device MAC and port index from a session uplink
+/// record. Returns `(None, None)` when the device has no uplink (gateways).
 fn parse_session_uplink(uplink: Option<&SessionUplink>) -> (Option<MacAddress>, Option<u32>) {
     let Some(uplink) = uplink else {
         return (None, None);

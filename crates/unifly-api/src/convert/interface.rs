@@ -115,6 +115,8 @@ pub(crate) fn enrich_radios_from_stats(radios: &mut [Radio], stats_interfaces: &
     }
 }
 
+/// Convert session `port_table` entries into [`Port`] values, skipping any
+/// entry without a `port_idx` (the controller's 1-based port number).
 pub(crate) fn parse_session_ports(ports: &[SessionPortEntry]) -> Vec<Port> {
     ports
         .iter()
@@ -167,6 +169,9 @@ fn session_radio_freq(band: &str) -> Option<f32> {
     }
 }
 
+/// Merge session `radio_table` entries with their `radio_table_stats`
+/// counterparts, matched by radio name. The Integration `interfaces` payload
+/// is not the source for radios.
 pub(crate) fn parse_session_radios(
     radios: &[SessionRadioEntry],
     stats: &[SessionRadioStats],
